@@ -10,7 +10,7 @@ async function generateSTTM() {
   const overviewSheet = workbook.addWorksheet('Overview');
   overviewSheet.columns = [
     { header: 'Attribute', key: 'attr', width: 35 },
-    { header: 'Value',     key: 'val',  width: 70 },
+    { header: 'Value',     key: 'val',  width: 80 },
   ];
   const overviewData = [
     ['Target Table',    'dw.location_d'],
@@ -18,59 +18,68 @@ async function generateSTTM() {
     ['Staging Table',   'staging.location_ds'],
     ['Load Strategy',   'Upsert (UPDATE existing rows + INSERT new rows)'],
     ['Grain',           'One row per location_code'],
-    ['Data Filter',     "TO_TIMESTAMP('{{data_filter_end_dttm}}', 'yyyymmdd HH24:MI:SS') >= erp_start_date"],
+    ['Data Filter',     "TO_TIMESTAMP('{{data_filter_end_dttm}}', 'yyyymmdd HH24:MI:SS') >= erp_start_date (from XYZdata.Oracle_Erp_start_Date)"],
   ];
   overviewData.forEach(([attr, val]) => overviewSheet.addRow({ attr, val }));
-
-  // Style header row
   styleHeaderRow(overviewSheet.getRow(1), '1F4E79');
 
   // ─── Sheet 2: Source Systems ──────────────────────────────────────────────────
   const srcSheet = workbook.addWorksheet('Source Systems');
   srcSheet.columns = [
-    { header: 'Source Alias',  key: 'alias',  width: 25 },
-    { header: 'Source Table',  key: 'table',  width: 45 },
-    { header: 'Schema',        key: 'schema', width: 30 },
+    { header: 'Schema',        key: 'schema', width: 32 },
+    { header: 'Table',         key: 'table',  width: 40 },
+    { header: 'SQL Alias',     key: 'alias',  width: 28 },
     { header: 'Description',   key: 'desc',   width: 70 },
   ];
   const srcData = [
-    ['location_code_list',  'InventoryOrgParametersPVO + ffmcenter',          'oracle_erp / order_management_service', 'UNION of ERP org codes and OMS fulfillment center names; provides the master list of location codes'],
-    ['InventoryOrgParametersPVO', 'InventoryOrgParametersPVO',                'oracle_erp',                            'Oracle ERP inventory org parameters (org code, enabled flag, business unit)'],
-    ['INV_ORG_PARAMETERS',  'INV_ORG_PARAMETERS',                             'oracle_erp',                            'Oracle ERP inventory org attributes (warehouse type, EZ Ship flag)'],
-    ['hr_locations',        'hr_locations',                                   'oracle_erp',                            'Oracle HR location master (address, city, state, postal code)'],
-    ['ffmcenter',           'ffmcenter',                                      'order_management_service',              'OMS fulfillment center master (id, name, type, address, SLA days)'],
-    ['ffmcenter_hist',      'ffmcenter_raw',                                  'denver_retirement',                     'Historical fulfillment center data'],
-    ['fcs',                 'fulfillment_center',                             'fcs',                                   'FCS fulfillment center details (enabled flag, display name, address, SLA)'],
-    ['tmp_location_id',     'location_d + codecombinationpvo',                'dw / oracle_erp',                       'Temporary table resolving oracle_location_id per location_code'],
+    { schema: 'oracle_erp',                  table: 'InventoryOrgParametersPVO',  alias: 'InventoryOrgParametersPVO / location_code_list (UNION branch 1)', desc: 'Oracle ERP inventory org parameters — provides org code (location_code), enabled flag, business unit, legal entity name' },
+    { schema: 'order_management_service',    table: 'ffmcenter',                  alias: 'ffmcenter / location_code_list (UNION branch 2)',                  desc: 'OMS fulfillment center master — provides id, name (used as location_code), type, address, SLA days, pick settings' },
+    { schema: 'oracle_erp',                  table: 'INV_ORG_PARAMETERS',         alias: 'INV_ORG_PARAMETERS',                                              desc: 'Oracle ERP inventory org attributes — provides warehouse type (ATTRIBUTE1) and EZ Ship flag' },
+    { schema: 'oracle_erp',                  table: 'hr_locations',               alias: 'hr_locations',                                                    desc: 'Oracle HR location master — provides address, city, state/region, postal code' },
+    { schema: 'denver_retirement',           table: 'ffmcenter_raw',              alias: 'ffmcenter_hist',                                                  desc: 'Historical fulfillment center data (joined but not currently used in SELECT output)' },
+    { schema: 'fcs',                         table: 'fulfillment_center',         alias: 'fcs',                                                             desc: 'FCS fulfillment center details — provides enabled flag, display name, address, SLA days, type' },
+    { schema: 'dw',                          table: 'location_d',                 alias: 'tmp_location_id (branch 1) / ps (UPDATE/INSERT)',                 desc: 'Target dimension table — used to resolve existing oracle_location_id and as the UPDATE/INSERT target' },
+    { schema: 'oracle_erp',                  table: 'codecombinationpvo',         alias: 'erp (in tmp_location_id branch 2)',                               desc: 'ERP code combination — used to parse oracle_location_id from codecombinationdescription via regex' },
+    { schema: 'XYZdata',                     table: 'Oracle_Erp_start_Date',      alias: '(subquery in WHERE clause)',                                      desc: 'Provides erp_start_date used in the data filter condition' },
   ];
-  srcData.forEach(([alias, table, schema, desc]) => srcSheet.addRow({ alias, table, schema, desc }));
+  srcData.forEach(r => srcSheet.addRow(r));
   styleHeaderRow(srcSheet.getRow(1), '1F4E79');
+  srcSheet.eachRow((row, rowNumber) => {
+    if (rowNumber === 1) return;
+    row.getCell('desc').alignment  = { wrapText: true, vertical: 'top' };
+    row.getCell('alias').alignment = { wrapText: true, vertical: 'top' };
+  });
 
   // ─── Sheet 3: Column Mapping ──────────────────────────────────────────────────
   const mapSheet = workbook.addWorksheet('Column Mapping');
   mapSheet.columns = [
-    { header: '#',                          key: 'num',          width: 5  },
-    { header: 'Target Column',              key: 'target_col',   width: 38 },
-    { header: 'Target Data Type',           key: 'target_dtype', width: 18 },
-    { header: 'Source Table(s)',            key: 'src_tables',   width: 45 },
-    { header: 'Source Column(s)',           key: 'src_cols',     width: 45 },
-    { header: 'Transformation / Business Logic', key: 'logic',   width: 80 },
-    { header: 'Mapping Type',              key: 'mapping_type', width: 30 },
-    { header: 'Nullable',                  key: 'nullable',     width: 12 },
-    { header: 'Notes',                     key: 'notes',        width: 60 },
+    { header: '#',                               key: 'num',          width: 5  },
+    { header: 'Target Column',                   key: 'target_col',   width: 38 },
+    { header: 'Target Data Type',                key: 'target_dtype', width: 18 },
+    { header: 'Source Schema.Table',             key: 'src_tables',   width: 50 },
+    { header: 'Source Column(s)',                key: 'src_cols',     width: 45 },
+    { header: 'Transformation / Business Logic', key: 'logic',        width: 85 },
+    { header: 'Mapping Type',                    key: 'mapping_type', width: 32 },
+    { header: 'Nullable',                        key: 'nullable',     width: 12 },
+    { header: 'Notes',                           key: 'notes',        width: 65 },
   ];
+
+  // location_code_list is a UNION subquery of:
+  //   oracle_erp.InventoryOrgParametersPVO  → OrgOrganizationDefinitionsPOrganizationCode
+  //   order_management_service.ffmcenter    → name
+  // dw_site_id is also derived inside that subquery from businessunitpeoname
 
   const rows = [
     {
       num: 1,
       target_col: 'location_code',
       target_dtype: 'VARCHAR',
-      src_tables: 'location_code_list',
-      src_cols: 'location_code',
-      logic: "Direct — derived from UNION of OrgOrganizationDefinitionsPOrganizationCode (ERP) and ffmcenter.name (OMS)",
-      mapping_type: 'Direct Mapping',
+      src_tables: 'oracle_erp.InventoryOrgParametersPVO\norder_management_service.ffmcenter',
+      src_cols: 'OrgOrganizationDefinitionsPOrganizationCode (ERP branch)\nname (OMS branch)',
+      logic: "UNION of DISTINCT OrgOrganizationDefinitionsPOrganizationCode from oracle_erp.InventoryOrgParametersPVO and DISTINCT name from order_management_service.ffmcenter. The combined result forms the master list of location codes.",
+      mapping_type: 'Derived/Computed',
       nullable: 'NOT NULL',
-      notes: 'Natural/business key; grain of the dimension table',
+      notes: 'Natural/business key; grain of the dimension. Derived from a UNION subquery aliased as location_code_list.',
     },
     {
       num: 2,
@@ -78,10 +87,10 @@ async function generateSTTM() {
       target_dtype: 'INTEGER',
       src_tables: 'dw.location_d',
       src_cols: 'location_key',
-      logic: "Surrogate key: ROW_NUMBER() OVER (ORDER BY 'location_key') + MAX(location_key) from existing dw.location_d. Applied only on INSERT of new rows.",
+      logic: "ROW_NUMBER() OVER (ORDER BY 'location_key') + (SELECT MAX(location_key) FROM dw.location_d). Applied only on INSERT of new rows.",
       mapping_type: 'Derived/Computed',
       nullable: 'NOT NULL',
-      notes: 'Surrogate key generated only on INSERT; offset from current MAX to avoid collisions',
+      notes: 'Surrogate key generated only on INSERT; offset from current MAX to avoid collisions with existing keys.',
     },
     {
       num: 3,
@@ -89,10 +98,10 @@ async function generateSTTM() {
       target_dtype: 'INTEGER',
       src_tables: 'order_management_service.ffmcenter',
       src_cols: 'id',
-      logic: 'Direct — ffmcenter.id. Aggregated with MAX() in final SELECT.',
+      logic: 'Direct — ffmcenter.id. Aggregated with MAX() in UPDATE/INSERT SELECT.',
       mapping_type: 'Direct Mapping',
       nullable: 'NULLABLE',
-      notes: 'MAX() aggregation used to collapse multiple rows per location_code',
+      notes: 'MAX() aggregation used to collapse multiple staging rows per location_code.',
     },
     {
       num: 4,
@@ -109,12 +118,12 @@ async function generateSTTM() {
       num: 5,
       target_col: 'location_display_name',
       target_dtype: 'VARCHAR',
-      src_tables: 'fcs.fulfillment_center, oracle_erp.hr_locations, InventoryOrgParametersPVO',
-      src_cols: 'display_name, LegalEntityPEOName, region_2, InvOrgNamePEOName',
-      logic: "NVL(LegalEntityPEOName || ' (' || hr_locations.region_2 || ' - ' || InvOrgNamePEOName || ')', fcs.display_name) — prefers ERP-derived name; falls back to FCS display name. Aggregated with MAX().",
+      src_tables: 'oracle_erp.InventoryOrgParametersPVO\noracle_erp.hr_locations\nfcs.fulfillment_center',
+      src_cols: 'LegalEntityPEOName (InventoryOrgParametersPVO)\nInvOrgNamePEOName (InventoryOrgParametersPVO)\nregion_2 (hr_locations)\ndisplay_name (fcs.fulfillment_center)',
+      logic: "NVL(LegalEntityPEOName || ' (' || hr_locations.region_2 || ' - ' || InvOrgNamePEOName || ')', fcs.display_name). ERP-derived composite name preferred; falls back to fcs.display_name when ERP name is NULL. Aggregated with MAX().",
       mapping_type: 'Conditional Logic/ CASE Statement',
       nullable: 'NULLABLE',
-      notes: 'ERP-derived name preferred; NVL fallback to fcs.display_name',
+      notes: 'NVL acts as conditional: ERP composite name takes priority; fcs.display_name is the fallback.',
     },
     {
       num: 6,
@@ -125,7 +134,7 @@ async function generateSTTM() {
       logic: "CASE WHEN OrgOrganizationDefinitionsPInventoryEnabledFlag = 'Y' THEN 1 ELSE 0 END. Aggregated with MAX().",
       mapping_type: 'Conditional Logic/ CASE Statement',
       nullable: 'NULLABLE',
-      notes: "Flag encoded as integer: 1 = active, 0 = inactive",
+      notes: "Flag encoded as integer: 1 = active ('Y'), 0 = inactive (any other value).",
     },
     {
       num: 7,
@@ -136,40 +145,40 @@ async function generateSTTM() {
       logic: "CASE WHEN ATTRIBUTE1 IN ('Retail','Pharmacy') THEN 0 WHEN ATTRIBUTE1 = 'Freezer' THEN 1 WHEN ATTRIBUTE1 = 'Cross Dock' THEN 3 END. Aggregated with MAX().",
       mapping_type: 'Conditional Logic/ CASE Statement',
       nullable: 'NULLABLE',
-      notes: 'Retail/Pharmacy=0, Freezer=1, Cross Dock=3; NULL for unrecognised values',
+      notes: 'Retail/Pharmacy=0, Freezer=1, Cross Dock=3. NULL for unrecognised ATTRIBUTE1 values. Joined via INV_ORG_PARAMETERS.ORGANIZATION_ID = InventoryOrgParametersPVO.OrganizationId.',
     },
     {
       num: 8,
       target_col: 'location_address1',
       target_dtype: 'VARCHAR',
-      src_tables: 'fcs.fulfillment_center, oracle_erp.hr_locations',
-      src_cols: 'address_line1, address_line_1',
-      logic: 'CASE WHEN TYPE = \'DROPSHIP\' THEN fcs.address_line1 ELSE hr_locations.address_line_1 END. DROPSHIP locations use FCS address; all others use HR address. Aggregated with MAX().',
+      src_tables: 'fcs.fulfillment_center\noracle_erp.hr_locations',
+      src_cols: 'address_line1 (fcs.fulfillment_center)\naddress_line_1 (oracle_erp.hr_locations)',
+      logic: "CASE WHEN TYPE = 'DROPSHIP' THEN fcs.address_line1 ELSE hr_locations.address_line_1 END. Aggregated with MAX().",
       mapping_type: 'Conditional Logic/ CASE Statement',
       nullable: 'NULLABLE',
-      notes: 'Address source priority: DROPSHIP → FCS; all others → Oracle HR',
+      notes: 'TYPE comes from order_management_service.ffmcenter. DROPSHIP → FCS address; all other types → Oracle HR address.',
     },
     {
       num: 9,
       target_col: 'location_city',
       target_dtype: 'VARCHAR',
-      src_tables: 'fcs.fulfillment_center, oracle_erp.hr_locations',
-      src_cols: 'city, town_or_city',
+      src_tables: 'fcs.fulfillment_center\noracle_erp.hr_locations',
+      src_cols: 'city (fcs.fulfillment_center)\ntown_or_city (oracle_erp.hr_locations)',
       logic: "CASE WHEN TYPE = 'DROPSHIP' THEN fcs.city ELSE hr_locations.town_or_city END. Aggregated with MAX().",
       mapping_type: 'Conditional Logic/ CASE Statement',
       nullable: 'NULLABLE',
-      notes: 'Same address source priority rule as location_address1',
+      notes: 'Same address source priority rule as location_address1.',
     },
     {
       num: 10,
       target_col: 'location_post_code',
       target_dtype: 'VARCHAR',
-      src_tables: 'fcs.fulfillment_center, oracle_erp.hr_locations',
-      src_cols: 'postal_code',
+      src_tables: 'fcs.fulfillment_center\noracle_erp.hr_locations',
+      src_cols: 'postal_code (fcs.fulfillment_center)\npostal_code (oracle_erp.hr_locations)',
       logic: "CASE WHEN TYPE = 'DROPSHIP' THEN fcs.postal_code ELSE hr_locations.postal_code END. Aggregated with MAX().",
       mapping_type: 'Conditional Logic/ CASE Statement',
       nullable: 'NULLABLE',
-      notes: 'Same address source priority rule as location_address1',
+      notes: 'Same address source priority rule as location_address1.',
     },
     {
       num: 11,
@@ -188,7 +197,7 @@ async function generateSTTM() {
       target_dtype: 'INTEGER',
       src_tables: 'order_management_service.ffmcenter',
       src_cols: 'maxnumpick',
-      logic: 'Direct — maxnumpick. Aggregated with MAX().',
+      logic: 'Direct — ffmcenter.maxnumpick. Aggregated with MAX().',
       mapping_type: 'Direct Mapping',
       nullable: 'NULLABLE',
       notes: '',
@@ -199,7 +208,7 @@ async function generateSTTM() {
       target_dtype: 'INTEGER',
       src_tables: 'order_management_service.ffmcenter',
       src_cols: 'pick_delay',
-      logic: 'Direct — pick_delay. Aggregated with MAX().',
+      logic: 'Direct — ffmcenter.pick_delay. Aggregated with MAX().',
       mapping_type: 'Direct Mapping',
       nullable: 'NULLABLE',
       notes: '',
@@ -210,10 +219,10 @@ async function generateSTTM() {
       target_dtype: 'NUMERIC',
       src_tables: '(none)',
       src_cols: '(none)',
-      logic: 'Hardcoded NULL — not currently sourced. Aggregated with MAX().',
+      logic: 'NULL — hardcoded literal NULL. Aggregated with MAX().',
       mapping_type: 'Hardcoded/Null',
       nullable: 'NULLABLE',
-      notes: 'Placeholder column; no source data available at this time',
+      notes: 'Placeholder column; no source data available at this time.',
     },
     {
       num: 15,
@@ -221,7 +230,7 @@ async function generateSTTM() {
       target_dtype: 'INTEGER',
       src_tables: 'order_management_service.ffmcenter',
       src_cols: 'default_ship_offset',
-      logic: 'Direct — default_ship_offset. Aggregated with MAX().',
+      logic: 'Direct — ffmcenter.default_ship_offset. Aggregated with MAX().',
       mapping_type: 'Direct Mapping',
       nullable: 'NULLABLE',
       notes: '',
@@ -232,43 +241,43 @@ async function generateSTTM() {
       target_dtype: 'BOOLEAN',
       src_tables: 'fcs.fulfillment_center',
       src_cols: 'fc_enabled',
-      logic: 'NOT fcs.fc_enabled — inverted active flag. Aggregated with MAX().',
+      logic: 'NOT fcs.fc_enabled — logical NOT of the active flag. Aggregated with MAX().',
       mapping_type: 'Derived/Computed',
       nullable: 'NULLABLE',
-      notes: 'Logical inverse of fulfillment_active; derived from the same source column fc_enabled',
+      notes: 'Logical inverse of fulfillment_active; both columns derive from the same source column fcs.fc_enabled.',
     },
     {
       num: 17,
       target_col: 'legal_company_description',
       target_dtype: 'VARCHAR',
-      src_tables: 'location_code_list',
-      src_cols: 'location_code, dw_site_id',
-      logic: "CASE on location_code / dw_site_id: 'SDF1'→'Petsmart', 'SDF3'→'Wholesale', 'STK1'→'XYZ Virtual Care', 'STK2'→'Stark Services PLLC', dw_site_id=60→'Retail Canada', else 'Retail'. Aggregated with MAX().",
+      src_tables: 'oracle_erp.InventoryOrgParametersPVO\norder_management_service.ffmcenter',
+      src_cols: 'OrgOrganizationDefinitionsPOrganizationCode (location_code)\nbusinessunitpeoname → dw_site_id (derived in UNION subquery)',
+      logic: "CASE WHEN location_code = 'SDF1' THEN 'Petsmart' WHEN location_code = 'SDF3' THEN 'Wholesale' WHEN location_code = 'STK1' THEN 'XYZ Virtual Care' WHEN location_code = 'STK2' THEN 'Stark Services PLLC' WHEN dw_site_id = 60 THEN 'Retail Canada' ELSE 'Retail' END. Aggregated with MAX().",
       mapping_type: 'Conditional Logic/ CASE Statement',
       nullable: 'NULLABLE',
-      notes: 'Specific overrides for known location codes; Canada site (dw_site_id=60) maps to Retail Canada',
+      notes: "dw_site_id is derived in the UNION subquery: businessunitpeoname = 'XYZ CA BU' → 60, else 10. Specific location_code overrides take priority over site-level rule.",
     },
     {
       num: 18,
       target_col: 'product_company_description',
       target_dtype: 'VARCHAR',
-      src_tables: 'location_code_list, fcs.fulfillment_center',
-      src_cols: 'location_code, dw_site_id, type',
-      logic: "CASE: STK%→'XYZ Healthcare Services', PHARMA+site 10→'XYZ Pharmacy', PHARMA+site 60→'XYZ Pharmacy Canada', site 60→'XYZ Canada', else 'XYZ'. Aggregated with MAX().",
+      src_tables: 'oracle_erp.InventoryOrgParametersPVO\norder_management_service.ffmcenter\nfcs.fulfillment_center',
+      src_cols: 'OrgOrganizationDefinitionsPOrganizationCode (location_code)\nbusinessunitpeoname → dw_site_id (derived)\ntype (fcs.fulfillment_center)',
+      logic: "CASE WHEN location_code LIKE 'STK%' THEN 'XYZ Healthcare Services' WHEN fcs.type = 'PHARMA' AND dw_site_id = 10 THEN 'XYZ Pharmacy' WHEN fcs.type = 'PHARMA' AND dw_site_id = 60 THEN 'XYZ Pharmacy Canada' WHEN dw_site_id = 60 THEN 'XYZ Canada' ELSE 'XYZ' END. Aggregated with MAX().",
       mapping_type: 'Conditional Logic/ CASE Statement',
       nullable: 'NULLABLE',
-      notes: 'Multi-condition CASE using location_code pattern, dw_site_id, and fulfillment center type',
+      notes: 'Multi-condition CASE using location_code pattern match, dw_site_id (derived from businessunitpeoname), and fcs.type.',
     },
     {
       num: 19,
       target_col: 'oracle_location_id',
       target_dtype: 'INTEGER',
-      src_tables: 'tmp_location_id',
-      src_cols: 'oracle_location_id',
-      logic: 'Resolved via temp table tmp_location_id (see Temp Table sheet). Joined on location_code. Aggregated with MAX().',
+      src_tables: 'dw.location_d\noracle_erp.codecombinationpvo',
+      src_cols: 'oracle_location_id (dw.location_d — branch 1)\ncodecombinationsegment3 (oracle_erp.codecombinationpvo — branch 2)\ncodecombinationdescription (oracle_erp.codecombinationpvo — branch 2)',
+      logic: "Resolved via temp table tmp_location_id (UNION of two branches):\nBranch 1: SELECT DISTINCT oracle_location_id, location_code FROM dw.location_d WHERE oracle_location_id IS NOT NULL AND oracle_location_id NOT IN (codecombinationpvo derived IDs).\nBranch 2: SELECT DISTINCT codecombinationsegment3::int, split_part(regexp_substr(codecombinationdescription, '-[a-zA-Z] \\d-'), '-', 2) FROM oracle_erp.codecombinationpvo JOIN dw.location_d.\nJoined to staging on location_code. Aggregated with MAX().",
       mapping_type: 'Derived/Computed',
       nullable: 'NULLABLE',
-      notes: 'See "Temp Table" sheet for full resolution logic using UNION of existing DW values and ERP code combination parsing',
+      notes: 'See "Temp Table" sheet for full resolution logic. Branch 2 parses location_code from codecombinationdescription using regex -[a-zA-Z] \\d- and splits on -.',
     },
     {
       num: 20,
@@ -279,29 +288,29 @@ async function generateSTTM() {
       logic: "CASE WHEN ATTRIBUTE1 = 'EZ Ship' THEN TRUE ELSE FALSE END. Aggregated with MAX().",
       mapping_type: 'Conditional Logic/ CASE Statement',
       nullable: 'NULLABLE',
-      notes: '',
+      notes: "Joined via INV_ORG_PARAMETERS.ORGANIZATION_ID = InventoryOrgParametersPVO.OrganizationId.",
     },
     {
       num: 21,
       target_col: 'location_address2',
       target_dtype: 'VARCHAR',
-      src_tables: 'fcs.fulfillment_center, oracle_erp.hr_locations',
-      src_cols: 'address_line2, address_line_2',
+      src_tables: 'fcs.fulfillment_center\noracle_erp.hr_locations',
+      src_cols: 'address_line2 (fcs.fulfillment_center)\naddress_line_2 (oracle_erp.hr_locations)',
       logic: "CASE WHEN TYPE = 'DROPSHIP' THEN fcs.address_line2 ELSE hr_locations.address_line_2 END. Aggregated with MAX().",
       mapping_type: 'Conditional Logic/ CASE Statement',
       nullable: 'NULLABLE',
-      notes: 'Same address source priority rule as location_address1',
+      notes: 'Same address source priority rule as location_address1.',
     },
     {
       num: 22,
       target_col: 'location_state',
       target_dtype: 'VARCHAR(2)',
-      src_tables: 'fcs.fulfillment_center, oracle_erp.hr_locations',
-      src_cols: 'state, region_2',
-      logic: "UPPER(LEFT(CASE WHEN TYPE = 'DROPSHIP' THEN fcs.state ELSE hr_locations.region_2 END, 2)) — upper-cased 2-character state code. Aggregated with MAX().",
+      src_tables: 'fcs.fulfillment_center\noracle_erp.hr_locations',
+      src_cols: 'state (fcs.fulfillment_center)\nregion_2 (oracle_erp.hr_locations)',
+      logic: "UPPER(LEFT(CASE WHEN TYPE = 'DROPSHIP' THEN fcs.state ELSE hr_locations.region_2 END, 2)). Aggregated with MAX().",
       mapping_type: 'Derived/Computed',
       nullable: 'NULLABLE',
-      notes: 'Always upper-cased and truncated to 2 characters regardless of source value length',
+      notes: 'Always upper-cased and truncated to 2 characters. Same DROPSHIP/non-DROPSHIP address priority as other address columns.',
     },
     {
       num: 23,
@@ -319,7 +328,7 @@ async function generateSTTM() {
   rows.forEach(r => mapSheet.addRow(r));
   styleHeaderRow(mapSheet.getRow(1), '1F4E79');
 
-  // Colour-code Mapping Type column (col 7)
+  // Colour-code Mapping Type column
   const mappingTypeColors = {
     'Direct Mapping':                    'C6EFCE',  // green
     'Conditional Logic/ CASE Statement': 'FFEB9C',  // yellow
@@ -337,55 +346,62 @@ async function generateSTTM() {
         fgColor: { argb: 'FF' + mappingTypeColors[val] },
       };
     }
-    // Wrap text for logic and notes columns
-    row.getCell('logic').alignment  = { wrapText: true, vertical: 'top' };
-    row.getCell('notes').alignment  = { wrapText: true, vertical: 'top' };
-    row.getCell('src_tables').alignment = { wrapText: true, vertical: 'top' };
-    row.getCell('src_cols').alignment   = { wrapText: true, vertical: 'top' };
+    ['logic', 'notes', 'src_tables', 'src_cols'].forEach(k => {
+      row.getCell(k).alignment = { wrapText: true, vertical: 'top' };
+    });
+    row.getCell('target_col').alignment = { vertical: 'top' };
+    row.getCell('mapping_type').alignment = { vertical: 'top' };
+    row.getCell('nullable').alignment = { vertical: 'top' };
   });
 
   // ─── Sheet 4: Temp Table ──────────────────────────────────────────────────────
   const tmpSheet = workbook.addWorksheet('Temp Table');
   tmpSheet.columns = [
-    { header: 'Branch',  key: 'branch', width: 15 },
-    { header: 'Source',  key: 'source', width: 35 },
-    { header: 'Logic',   key: 'logic',  width: 90 },
+    { header: 'Branch',         key: 'branch',  width: 12 },
+    { header: 'Source Tables',  key: 'source',  width: 45 },
+    { header: 'Source Columns', key: 'cols',    width: 45 },
+    { header: 'Logic',          key: 'logic',   width: 90 },
   ];
   tmpSheet.addRow({
     branch: 'Branch 1',
     source: 'dw.location_d',
-    logic:  'Select oracle_location_id and location_code where oracle_location_id IS NOT NULL AND the ID does not already exist in the ERP codecombinationpvo join result (avoids duplicates).',
+    cols:   'oracle_location_id, location_code',
+    logic:  "SELECT DISTINCT oracle_location_id::int, location_code FROM dw.location_d WHERE oracle_location_id IS NOT NULL AND oracle_location_id NOT IN (SELECT DISTINCT codecombinationsegment3::int FROM oracle_erp.codecombinationpvo JOIN dw.location_d ON split_part(regexp_substr(codecombinationdescription, '-[a-zA-Z] \\d-'), '-', 2) = location_code). Preserves existing DW values that are not superseded by ERP parsing.",
   });
   tmpSheet.addRow({
     branch: 'Branch 2',
-    source: 'oracle_erp.codecombinationpvo JOIN dw.location_d',
-    logic:  'Extract codecombinationsegment3::int as oracle_location_id; extract location_code by parsing codecombinationdescription with regex -[a-zA-Z] \\d- and splitting on -.',
+    source: 'oracle_erp.codecombinationpvo\ndw.location_d',
+    cols:   'codecombinationsegment3 → oracle_location_id\ncodecombinationdescription → location_code (via regex)',
+    logic:  "SELECT DISTINCT codecombinationsegment3::int AS oracle_location_id, split_part(regexp_substr(codecombinationdescription, '-[a-zA-Z] \\d-'), '-', 2) AS location_code FROM oracle_erp.codecombinationpvo erp JOIN dw.location_d loc ON split_part(regexp_substr(erp.codecombinationdescription, '-[a-zA-Z] \\d-'), '-', 2) = loc.location_code. Extracts oracle_location_id from ERP code combinations by parsing the description field.",
   });
   styleHeaderRow(tmpSheet.getRow(1), '1F4E79');
   tmpSheet.eachRow((row, rowNumber) => {
     if (rowNumber === 1) return;
-    row.getCell('logic').alignment = { wrapText: true, vertical: 'top' };
+    ['logic', 'source', 'cols'].forEach(k => {
+      row.getCell(k).alignment = { wrapText: true, vertical: 'top' };
+    });
   });
 
   // ─── Sheet 5: Load Strategy ───────────────────────────────────────────────────
   const loadSheet = workbook.addWorksheet('Load Strategy');
   loadSheet.columns = [
     { header: 'Step',        key: 'step',  width: 10 },
-    { header: 'Name',        key: 'name',  width: 40 },
+    { header: 'Name',        key: 'name',  width: 45 },
     { header: 'Description', key: 'desc',  width: 100 },
   ];
   const loadData = [
-    { step: 'Step 1', name: 'Populate Staging (staging.location_ds)',  desc: 'Truncate/replace staging table with the full SELECT from source systems. Data filter: only process if {{data_filter_end_dttm}} >= ERP start date.' },
-    { step: 'Step 2', name: 'Build tmp_location_id',                   desc: 'Resolve oracle_location_id per location_code using UNION of existing DW values and ERP code combination parsing.' },
-    { step: 'Step 3', name: 'UPDATE existing rows in dw.location_d',   desc: 'Match on location_code. All non-key attributes are overwritten with the latest values from staging (aggregated via MAX()).' },
-    { step: 'Step 4', name: 'INSERT new rows into dw.location_d',      desc: "Only rows where location_code does NOT already exist in dw.location_d (LEFT JOIN + WHERE ps.location_code IS NULL). location_key is generated as a sequential surrogate key offset from the current maximum." },
-    { step: 'Step 5', name: 'COMMIT',                                  desc: 'Commit the transaction.' },
+    { step: 'Step 1', name: 'Populate Staging (staging.location_ds)',  desc: "INSERT INTO staging.location_ds: full SELECT from source systems (oracle_erp.InventoryOrgParametersPVO, order_management_service.ffmcenter, oracle_erp.INV_ORG_PARAMETERS, oracle_erp.hr_locations, denver_retirement.ffmcenter_raw, fcs.fulfillment_center). Data filter: only process if TO_TIMESTAMP('{{data_filter_end_dttm}}', 'yyyymmdd HH24:MI:SS') >= erp_start_date from XYZdata.Oracle_Erp_start_Date." },
+    { step: 'Step 2', name: 'Build tmp_location_id',                   desc: 'Create local temporary table tmp_location_id (ON COMMIT PRESERVE ROWS). UNION of: (1) existing oracle_location_id values from dw.location_d not superseded by ERP parsing, and (2) oracle_location_id values parsed from oracle_erp.codecombinationpvo via regex on codecombinationdescription.' },
+    { step: 'Step 3', name: 'UPDATE existing rows in dw.location_d',   desc: 'UPDATE dw.location_d SET all non-key columns from a subquery on staging.location_ds LEFT JOIN tmp_location_id, grouped by location_code with MAX() aggregation. Match condition: ps.location_code = ls.location_code.' },
+    { step: 'Step 4', name: 'INSERT new rows into dw.location_d',      desc: "INSERT INTO dw.location_d: rows from staging.location_ds LEFT JOIN tmp_location_id (grouped, MAX() aggregated) LEFT JOIN dw.location_d WHERE ps.location_code IS NULL (i.e. location_code does not yet exist in target). location_key generated as ROW_NUMBER() OVER (ORDER BY 'location_key') + MAX(location_key) from dw.location_d." },
+    { step: 'Step 5', name: 'COMMIT',                                  desc: 'COMMIT the transaction to persist all changes.' },
   ];
   loadData.forEach(r => loadSheet.addRow(r));
   styleHeaderRow(loadSheet.getRow(1), '1F4E79');
   loadSheet.eachRow((row, rowNumber) => {
     if (rowNumber === 1) return;
     row.getCell('desc').alignment = { wrapText: true, vertical: 'top' };
+    row.getCell('name').alignment = { wrapText: true, vertical: 'top' };
   });
 
   // ─── Sheet 6: Business Rules ──────────────────────────────────────────────────
@@ -395,22 +411,25 @@ async function generateSTTM() {
     { header: 'Description', key: 'desc', width: 100 },
   ];
   const brData = [
-    { rule: 'Address source priority',    desc: 'DROPSHIP type → use FCS address fields; all other types → use Oracle HR address fields' },
-    { rule: 'Display name priority',      desc: 'ERP-derived name (LegalEntityPEOName + region_2 + InvOrgNamePEOName) preferred; falls back to fcs.display_name via NVL' },
-    { rule: 'Warehouse type encoding',    desc: 'Retail/Pharmacy = 0, Freezer = 1, Cross Dock = 3' },
-    { rule: 'Active warehouse flag',      desc: "1 if OrgOrganizationDefinitionsPInventoryEnabledFlag = 'Y', else 0" },
-    { rule: 'Mark for delete',            desc: 'Inverse of fcs.fc_enabled' },
-    { rule: 'Legal company',              desc: "Specific overrides for SDF1, SDF3, STK1, STK2; Canada site (60) = 'Retail Canada'; default = 'Retail'" },
-    { rule: 'Product company',            desc: "STK% codes → 'XYZ Healthcare Services'; PHARMA type by site; Canada site → 'XYZ Canada'; default → 'XYZ'" },
-    { rule: 'State code',                 desc: 'Always upper-cased and truncated to 2 characters' },
-    { rule: 'Storage rate',               desc: 'Always NULL (not yet sourced)' },
-    { rule: 'Surrogate key',              desc: 'Generated only on INSERT; offset from current MAX to avoid collisions' },
+    { rule: 'Address source priority',    desc: "DROPSHIP type (from order_management_service.ffmcenter.type) → use fcs.fulfillment_center address fields; all other types → use oracle_erp.hr_locations address fields" },
+    { rule: 'Display name priority',      desc: "ERP-derived composite name (LegalEntityPEOName || ' (' || hr_locations.region_2 || ' - ' || InvOrgNamePEOName || ')') preferred; falls back to fcs.display_name via NVL when ERP name is NULL" },
+    { rule: 'Warehouse type encoding',    desc: "oracle_erp.INV_ORG_PARAMETERS.ATTRIBUTE1: Retail/Pharmacy = 0, Freezer = 1, Cross Dock = 3; NULL for unrecognised values" },
+    { rule: 'Active warehouse flag',      desc: "oracle_erp.InventoryOrgParametersPVO.OrgOrganizationDefinitionsPInventoryEnabledFlag: 1 if 'Y', else 0" },
+    { rule: 'Mark for delete',            desc: 'Logical NOT of fcs.fulfillment_center.fc_enabled' },
+    { rule: 'Legal company',              desc: "Specific overrides for SDF1→Petsmart, SDF3→Wholesale, STK1→XYZ Virtual Care, STK2→Stark Services PLLC; dw_site_id=60 (XYZ CA BU) → 'Retail Canada'; default → 'Retail'" },
+    { rule: 'Product company',            desc: "STK% location codes → 'XYZ Healthcare Services'; fcs.type='PHARMA' + site 10 → 'XYZ Pharmacy'; fcs.type='PHARMA' + site 60 → 'XYZ Pharmacy Canada'; site 60 → 'XYZ Canada'; default → 'XYZ'" },
+    { rule: 'State code',                 desc: 'Always UPPER-cased and truncated to 2 characters via UPPER(LEFT(..., 2))' },
+    { rule: 'Storage rate',               desc: 'Always NULL — hardcoded literal; no source data available' },
+    { rule: 'Surrogate key',              desc: "Generated only on INSERT; ROW_NUMBER() OVER (ORDER BY 'location_key') + MAX(location_key) from dw.location_d to avoid collisions" },
+    { rule: 'dw_site_id derivation',      desc: "Derived inside the UNION subquery: businessunitpeoname = 'XYZ CA BU' → 60, else 10. Used in legal_company_description and product_company_description CASE logic." },
+    { rule: 'Data filter',                desc: "Only process records where TO_TIMESTAMP('{{data_filter_end_dttm}}', 'yyyymmdd HH24:MI:SS') >= erp_start_date from XYZdata.Oracle_Erp_start_Date" },
   ];
   brData.forEach(r => brSheet.addRow(r));
   styleHeaderRow(brSheet.getRow(1), '1F4E79');
   brSheet.eachRow((row, rowNumber) => {
     if (rowNumber === 1) return;
     row.getCell('desc').alignment = { wrapText: true, vertical: 'top' };
+    row.getCell('rule').alignment = { wrapText: true, vertical: 'top' };
   });
 
   // ─── Save ─────────────────────────────────────────────────────────────────────
