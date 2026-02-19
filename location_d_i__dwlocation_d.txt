@@ -1,0 +1,299 @@
+insert into staging.location_ds
+(
+    location_code,
+    fulfillment_center_id,
+    fulfillment_active,
+    location_display_name,
+    location_active_warehouse,
+    location_warehouse_type,
+    location_address1,
+    location_city,
+    location_post_code,
+    fulfillment_center_dropship_flag,
+    fulfillment_center_max_pick_number,
+    fulfillment_center_pick_delay,
+    fulfillment_center_storage_rate,
+    fulfillment_center_default_shipping_offset,
+    fulfillment_center_mark_for_delete,
+    legal_company_description,
+    product_company_description,
+    location_ez_ship_flag,    
+    location_address2,
+    location_state,
+    location_ship_sla_days
+)
+
+SELECT
+    location_code_list.location_code,
+    ffmcenter.id AS fulfillment_center_id,
+    fcs.fc_enabled AS fulfillment_active,
+    NVL(
+        LegalEntityPEOName || ' (' || hr_locations.region_2 || ' - ' || InvOrgNamePEOName || ')',
+        fcs.display_name
+    ) AS location_display_name,
+    CASE
+        WHEN OrgOrganizationDefinitionsPInventoryEnabledFlag = 'Y' THEN 1
+        ELSE 0
+    END AS location_active_warehouse,
+    CASE
+        WHEN INV_ORG_PARAMETERS.ATTRIBUTE1 IN ('Retail', 'Pharmacy') THEN 0
+        WHEN INV_ORG_PARAMETERS.ATTRIBUTE1 = 'Freezer' THEN 1
+        WHEN INV_ORG_PARAMETERS.ATTRIBUTE1 = 'Cross Dock' THEN 3
+    END AS location_warehouse_type,
+    CASE
+        WHEN TYPE = 'DROPSHIP' THEN fcs.address_line1
+        ELSE hr_locations.address_line_1
+    END AS location_address_1,
+    CASE
+        WHEN TYPE = 'DROPSHIP' THEN fcs.city
+        ELSE hr_locations.town_or_city
+    END AS location_city,
+    CASE
+        WHEN TYPE = 'DROPSHIP' THEN fcs.postal_code
+        ELSE hr_locations.postal_code
+    END AS location_post_code,
+    CASE TYPE
+        WHEN 'DROPSHIP' THEN TRUE
+        ELSE FALSE
+    END AS fulfillment_center_dropship_flag,
+    maxnumpick AS fulfillment_center_max_pick_number,
+    pick_delay AS fulfillment_center_pick_delay,
+    NULL AS fulfillment_center_storage_rate,
+    default_ship_offset AS fulfillment_center_default_shipping_offset,
+    NOT fcs.fc_enabled AS fulfillment_center_mark_for_delete,
+    CASE
+        WHEN location_code_list.location_code = 'SDF1' THEN 'Petsmart'
+        WHEN location_code_list.location_code = 'SDF3' THEN 'Wholesale'
+        WHEN location_code_list.location_code = 'STK1' then 'XYZ Virtual Care'
+        WHEN location_code_list.location_code = 'STK2' then 'Stark Services PLLC'
+        WHEN location_code_list.dw_site_id = 60 THEN 'Retail Canada'
+        ELSE 'Retail'
+    END AS legal_company_desc,
+    CASE
+        WHEN location_code_list.location_code LIKE 'STK%' THEN 'XYZ Healthcare Services'
+        WHEN fcs.type = 'PHARMA' AND location_code_list.dw_site_id = 10 THEN 'XYZ Pharmacy'
+        WHEN fcs.type = 'PHARMA' AND location_code_list.dw_site_id = 60 THEN 'XYZ Pharmacy Canada'
+        WHEN location_code_list.dw_site_id = 60 THEN 'XYZ Canada'
+        ELSE 'XYZ'
+    END AS product_company_description,
+    CASE
+        WHEN INV_ORG_PARAMETERS.ATTRIBUTE1 = 'EZ Ship' THEN TRUE
+        ELSE FALSE
+    END AS location_ez_ship_flag,
+    CASE
+        WHEN TYPE = 'DROPSHIP' THEN fcs.address_line2
+        ELSE hr_locations.address_line_2
+    END AS location_address_2,
+    UPPER(
+        LEFT(
+            CASE
+                WHEN TYPE = 'DROPSHIP' THEN fcs.state
+                ELSE hr_locations.region_2
+            END,
+            2
+        )
+    ) AS location_state,
+    fcs.ship_sla_days AS location_ship_sla_days
+FROM (
+    SELECT DISTINCT
+        OrgOrganizationDefinitionsPOrganizationCode AS location_code,
+        CASE
+            WHEN businessunitpeoname = 'XYZ CA BU' THEN 60
+            ELSE 10
+        END AS dw_site_id
+    FROM oracle_erp.InventoryOrgParametersPVO
+
+    UNION
+
+    SELECT DISTINCT
+        name,
+        dw_site_id
+    FROM order_management_service.ffmcenter
+) location_code_list
+LEFT JOIN oracle_erp.InventoryOrgParametersPVO
+    ON InventoryOrgParametersPVO.OrgOrganizationDefinitionsPOrganizationCode = location_code_list.location_code
+LEFT JOIN order_management_service.ffmcenter
+    ON ffmcenter.name = location_code_list.location_code
+LEFT JOIN oracle_erp.INV_ORG_PARAMETERS
+    ON INV_ORG_PARAMETERS.ORGANIZATION_ID = InventoryOrgParametersPVO.OrganizationId
+LEFT JOIN oracle_erp.hr_locations
+    ON hr_locations.location_code = location_code_list.location_code
+LEFT JOIN denver_retirement.ffmcenter_raw AS ffmcenter_hist
+    ON ffmcenter_hist.id = ffmcenter.id
+LEFT JOIN fcs.fulfillment_center fcs
+    ON fcs.id = location_code_list.location_code
+WHERE TO_TIMESTAMP('{{data_filter_end_dttm}}', 'yyyymmdd HH24:MI:SS') >= (
+    SELECT erp_start_date
+    FROM XYZdata.Oracle_Erp_start_Date
+);
+
+
+
+DROP TABLE IF EXISTS tmp_location_id;
+
+create local temporary table tmp_location_id
+        on commit preserve rows as select
+            distinct oracle_location_id::int as oracle_location_id,
+            location_code 
+    from
+        dw.location_d 
+    where
+        oracle_location_id is not null 
+        and oracle_location_id not in (
+            select
+                distinct codecombinationsegment3::int 
+            FROM
+                oracle_erp.codecombinationpvo 
+            join
+                dw.location_d 
+                    on split_part(regexp_substr(codecombinationdescription,
+                '-[a-zA-Z] \d-'),
+                '-',
+                2)=location_code
+        ) 
+    union
+    select
+        distinct erp.codecombinationsegment3::int as oracle_location_id,
+        split_part(regexp_substr(erp.codecombinationdescription,
+        '-[a-zA-Z] \d-'),
+        '-',
+        2) as location_code 
+    FROM
+        oracle_erp.codecombinationpvo erp 
+    join
+        dw.location_d as loc 
+            on split_part(regexp_substr(erp.codecombinationdescription,
+        '-[a-zA-Z] \d-'),
+        '-',
+        2)=loc.location_code;
+
+UPDATE dw.location_d AS ps
+    SET
+        location_code = ls.location_code,
+        fulfillment_center_id = ls.fulfillment_center_id,
+        fulfillment_active = ls.fulfillment_active,
+        location_display_name = ls.location_display_name,
+        location_active_warehouse = ls.location_active_warehouse,
+        location_warehouse_type = ls.location_warehouse_type,
+        location_address1 = ls.location_address1,
+        location_city = ls.location_city,
+        location_post_code = ls.location_post_code,
+        fulfillment_center_dropship_flag = ls.fulfillment_center_dropship_flag,
+        fulfillment_center_max_pick_number = ls.fulfillment_center_max_pick_number,
+        fulfillment_center_pick_delay = ls.fulfillment_center_pick_delay,
+        fulfillment_center_storage_rate = ls.fulfillment_center_storage_rate,
+        fulfillment_center_default_shipping_offset = ls.fulfillment_center_default_shipping_offset,
+        fulfillment_center_mark_for_delete = ls.fulfillment_center_mark_for_delete,
+        legal_company_description = ls.legal_company_description,
+        location_ez_ship_flag = ls.location_ez_ship_flag,
+        product_company_description = ls.product_company_description,
+        oracle_location_id = ls.oracle_location_id,
+        location_address2 = ls.location_address2,
+        location_state = ls.location_state,
+        location_ship_sla_days = ls.location_ship_sla_days 
+    FROM
+        (   SELECT
+            DISTINCT     location_ds.location_code,
+            MAX(fulfillment_center_id) AS fulfillment_center_id,
+            MAX(fulfillment_active) AS fulfillment_active,
+            MAX(location_display_name) AS location_display_name,
+            MAX(location_active_warehouse) AS location_active_warehouse,
+            MAX(location_warehouse_type) AS location_warehouse_type,
+            MAX(location_address1) AS location_address1,
+            MAX(location_city) AS location_city,
+            MAX(location_post_code) AS location_post_code,
+            MAX(fulfillment_center_dropship_flag) AS fulfillment_center_dropship_flag,
+            MAX(fulfillment_center_max_pick_number) AS fulfillment_center_max_pick_number,
+            MAX(fulfillment_center_pick_delay) AS fulfillment_center_pick_delay,
+            MAX(fulfillment_center_storage_rate) AS fulfillment_center_storage_rate,
+            MAX(fulfillment_center_default_shipping_offset) AS fulfillment_center_default_shipping_offset,
+            MAX(fulfillment_center_mark_for_delete) AS fulfillment_center_mark_for_delete,
+            MAX(legal_company_description) AS legal_company_description,
+            MAX(product_company_description) AS product_company_description,
+            MAX(tmp_location_id.oracle_location_id) AS oracle_location_id,
+            MAX(location_ez_ship_flag) AS location_ez_ship_flag,
+            MAX(location_address2) AS location_address2,
+            MAX(location_state) AS location_state,
+            MAX(location_ship_sla_days) AS location_ship_sla_days   
+        FROM
+            staging.location_ds   
+        LEFT JOIN
+            tmp_location_id     
+                ON location_ds.location_code = tmp_location_id.location_code   
+        GROUP BY
+            location_ds.location_code ) AS ls 
+    WHERE
+        ps.location_code = ls.location_code;
+
+
+
+INSERT INTO dw.location_d
+        (
+            location_code, location_key,   fulfillment_center_id,   fulfillment_active,   location_display_name,   location_active_warehouse,   location_warehouse_type,   location_address1,   location_city,   location_post_code,   fulfillment_center_dropship_flag,   fulfillment_center_max_pick_number,   fulfillment_center_pick_delay,   fulfillment_center_storage_rate,   fulfillment_center_default_shipping_offset,   fulfillment_center_mark_for_delete,   legal_company_description,   location_ez_ship_flag,   product_company_description,   oracle_location_id,   location_address2,   location_state,   location_ship_sla_days
+        )
+        SELECT
+
+            DISTINCT   ls.location_code,
+            row_number() over(order by 'location_key') + (SELECT max(location_key) FROM dw.location_d) as location_key,
+            ls.fulfillment_center_id,
+            ls.fulfillment_active,
+            ls.location_display_name,
+            ls.location_active_warehouse,
+            ls.location_warehouse_type,
+            ls.location_address1,
+            ls.location_city,
+            ls.location_post_code,
+            ls.fulfillment_center_dropship_flag,
+            ls.fulfillment_center_max_pick_number,
+            ls.fulfillment_center_pick_delay,
+            ls.fulfillment_center_storage_rate,
+            ls.fulfillment_center_default_shipping_offset,
+            ls.fulfillment_center_mark_for_delete,
+            ls.legal_company_description,
+            ls.location_ez_ship_flag,
+            ls.product_company_description,
+            ls.oracle_location_id,
+            ls.location_address2,
+            ls.location_state,
+            ls.location_ship_sla_days 
+        FROM
+            (   SELECT
+                location_ds.location_code,
+                MAX(fulfillment_center_id) AS fulfillment_center_id,
+                MAX(fulfillment_active) AS fulfillment_active,
+                MAX(location_display_name) AS location_display_name,
+                MAX(location_active_warehouse) AS location_active_warehouse,
+                MAX(location_warehouse_type) AS location_warehouse_type,
+                MAX(location_address1) AS location_address1,
+                MAX(location_city) AS location_city,
+                MAX(location_post_code) AS location_post_code,
+                MAX(fulfillment_center_dropship_flag) AS fulfillment_center_dropship_flag,
+                MAX(fulfillment_center_max_pick_number) AS fulfillment_center_max_pick_number,
+                MAX(fulfillment_center_pick_delay) AS fulfillment_center_pick_delay,
+                MAX(fulfillment_center_storage_rate) AS fulfillment_center_storage_rate,
+                MAX(fulfillment_center_default_shipping_offset) AS fulfillment_center_default_shipping_offset,
+                MAX(fulfillment_center_mark_for_delete) AS fulfillment_center_mark_for_delete,
+                MAX(legal_company_description) AS legal_company_description,
+                MAX(product_company_description) AS product_company_description,
+                MAX(tmp_location_id.oracle_location_id) AS oracle_location_id,
+                MAX(location_ez_ship_flag) AS location_ez_ship_flag,
+                MAX(location_address2) AS location_address2,
+                MAX(location_state) AS location_state,
+                MAX(location_ship_sla_days) AS location_ship_sla_days   
+            FROM
+                staging.location_ds   
+            LEFT JOIN
+                tmp_location_id     
+                    ON location_ds.location_code = tmp_location_id.location_code   
+            GROUP BY
+                location_ds.location_code ) AS ls 
+        LEFT JOIN
+            dw.location_d AS ps   
+                ON (
+                    ps.location_code = ls.location_code   
+                ) 
+        WHERE
+            ps.location_code IS NULL;
+
+
+COMMIT;
